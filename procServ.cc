@@ -1,14 +1,18 @@
 // Process server for soft ioc
 // David H. Thompson 8/29/2003
-// Ralph Lange <ralph.lange@gmx.de> 2007-2017
+// Ralph Lange <ralph.lange@gmx.de> 2007-2019
 // Ambroz Bizjak 02/29/2016
 // Freddie Akeroyd 2016
 // Michael Davidsaver 2017
+// Hinko Kocevar 2018
+// Klemen Vodopivec 2019
+
 // GNU Public License (GPLv3) applies - see www.gnu.org
 
 #include <vector>
 #include <string>
 #include <fstream>
+#include <sstream>
 
 #include <stdio.h>
 #include <assert.h>
@@ -46,12 +50,13 @@ bool   inDebugMode;              // This enables a lot of printfs
 bool   inFgMode = false;         // This keeps child in the foreground, tty connected
 bool   logPortLocal;             // This restricts log port access to localhost
 bool   ctlPortLocal = true;      // Restrict control connections to localhost
-bool   autoRestart = true;       // Enables instant restart of exiting child
 bool   waitForManualStart = false;  // Waits for telnet cmd to manually start child
 volatile bool shutdownServer = false;   // To keep the server from shutting down
 bool   quiet = false;            // Suppress info output (server)
 bool   setCoreSize = false;      // Set core size for child
 bool   singleEndpointStyle = true;  // Compatibility style: first non-option is endpoint
+RestartMode restartMode = restart;  // Child restart mode (restart/norestart/oneshot)
+bool   firstRun;                 // Has process run for purposes of oneshot restart mode
 char   *procservName;            // The name of this beast (server)
 char   *childName;               // The name of that beast (child)
 char   *childExec;               // Exec to run as child
@@ -68,6 +73,7 @@ rlim_t coreSize;                 // Max core size for child
 char   *chDir;                   // Directory to change to before starting child
 char   *myDir;                   // Directory where server was started
 time_t holdoffTime = 15;         // Holdoff time between child restarts (in seconds)
+int    childExitCode = 0;        // Child's exit code
 
 pid_t  procservPid;              // PID of server (daemon if not in debug mode)
 char   *pidFile;                 // File name for server PID
@@ -98,6 +104,7 @@ void OnPollTimeout();
 // Daemonizes the program
 void forkAndGo();
 void openLogFile();
+void setEnvVar();
 void writeInfoFile(const std::string& infofile);
 void ttySetCharNoEcho(bool save);
 
@@ -111,9 +118,8 @@ static volatile sig_atomic_t sigPipeSet;
 static volatile sig_atomic_t sigTermSet;
 static volatile sig_atomic_t sigHupSet;
 
-void writePidFile()
+void writePidFile(int pid)
 {
-    int pid = getpid();
     FILE * fp;
 
     if ( !pidFile || strlen(pidFile) == 0 )
@@ -179,6 +185,7 @@ void printHelp()
            "    --logstamp [<str>]    prefix log lines with timestamp [strftime format]\n"
            " -n --name <str>          set child's name (default: arg0 of <command>)\n"
            "    --noautorestart       do not restart child on exit by default\n"
+           " -o --oneshot             after child exits, exit the server\n"
            " -p --pidfile <str>       write PID file (for server PID)\n"
            " -P --port <endpoint>     allow control connections through telnet <endpoint>\n"
            " -q --quiet               suppress informational output (server)\n"
@@ -200,6 +207,7 @@ int main(int argc,char * argv[])
     int c;
     unsigned int i, j;
     int k;
+    long l;
     std::vector<std::string> ctlSpecs;
     char *command;
     bool bailout = false;
@@ -238,6 +246,7 @@ int main(int argc,char * argv[])
             {"logstamp",       optional_argument, 0, 'S'},
             {"name",           required_argument, 0, 'n'},
             {"noautorestart",  no_argument,       0, 'N'},
+            {"oneshot",        no_argument,       0, 'o'},
             {"pidfile",        required_argument, 0, 'p'},
             {"port",           required_argument, 0, 'P'},
             {"quiet",          no_argument,       0, 'q'},
@@ -252,7 +261,7 @@ int main(int argc,char * argv[])
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "+c:de:fhi:I:k:l:L:n:p:P:qVwx:",
+        c = getopt_long (argc, argv, "+c:de:fhi:I:k:l:L:n:op:P:qVwx:",
                          long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -268,9 +277,9 @@ int main(int argc,char * argv[])
             break;
 
         case 'C':                                 // Core size
-            k = atoi( optarg );
-            if ( k >= 0 ) {
-                coreSize = k;
+            l = atol( optarg );
+            if ( l >= 0 ) {
+                coreSize = l;
                 setCoreSize = true;
             }
             break;
@@ -358,7 +367,11 @@ int main(int argc,char * argv[])
             break;
 
         case 'N':                                 // No restart of child
-            autoRestart = false;
+            restartMode = norestart;
+            break;
+
+        case 'o':                                 // Exit server when child exits
+            restartMode = oneshot;
             break;
 
         case 'R':                                 // Restrict log
@@ -540,8 +553,11 @@ int main(int argc,char * argv[])
     else
     {
         debugFD = 1;          // Enable debug messages
+        // Write pidfile in foreground mode
+        writePidFile(procservPid);
     }
-    writePidFile();
+
+    setEnvVar();
 
     if (!infofile.empty()) {
         writeInfoFile(infofile);
@@ -578,6 +594,7 @@ int main(int argc,char * argv[])
         strncat(infoMessage1, buff, INFO1LEN-strlen(infoMessage1)-1);
     }
 
+    firstRun = true;
     // Run here until something makes it die
     while ( ! shutdownServer )
     {
@@ -636,8 +653,19 @@ int main(int argc,char * argv[])
             // This call returns NULL if the process item lives
             if (processFactoryNeedsRestart())
             {
-                npi= processFactory(childExec, childArgv);
-                if (npi) AddConnection(npi);
+                if ((restartMode == oneshot) && !firstRun) {
+                  PRINTF("Option oneshot is set... exiting\n");
+                  shutdownServer = true;
+                } else {
+		  if (logFileFD > 0) {
+		    fcntl(logFileFD, F_SETFD, FD_CLOEXEC);
+		  }
+                  npi= processFactory(childExec, childArgv);
+                  if (npi) AddConnection(npi);
+                  if (firstRun) {
+                  	firstRun = false;
+                  }
+                }
             }
         } else if (-1 == ready) {             // Error
             if (EINTR != errno) {
@@ -669,6 +697,8 @@ int main(int argc,char * argv[])
         unlink(infofile.c_str());
     if(pidFile && strlen(pidFile) > 0)
         unlink(pidFile);
+
+    return childExitCode;
 }
 
 // Connection items call this to send messages to others
@@ -765,6 +795,7 @@ void OnPollTimeout()
             snprintf(buf+strlen(buf), BUFLEN-strlen(buf),
                      " Normal exit status = %d",
                      WEXITSTATUS(wstatus));
+            childExitCode = WEXITSTATUS(wstatus);
         }
 
         if (WIFSIGNALED(wstatus)) {
@@ -841,11 +872,20 @@ void forkAndGo()
     pid_t p;
     int fh;
 
+    char buf[] = "/dev/null";
+    fh = open(buf, O_RDWR);
+    if (fh < 0) {
+        perror("Could not open /dev/null (for fork)");
+        exit(-1);
+    }
+
     if ((p = fork()) < 0) {  // Fork failed
         perror("Could not fork daemon process");
+        close(fh);
         exit(errno);
 
     } else if (p > 0) {      // I am the PARENT (foreground command)
+        close(fh);
         if (!quiet) {
             fprintf(stderr, "%s: spawning daemon process: %ld\n", procservName, (long) p);
             if (-1 == logFileFD) {
@@ -853,15 +893,15 @@ void forkAndGo()
                         logPort ? "" : " and no port for log connections");
             }
         }
+        // Write the pid file _on behalf of the child_ before exiting.
+        // This removes a race condition using a type=forking systemd service
+        writePidFile(p);
         exit(0);
 
     } else {                 // I am the CHILD (background daemon)
         procservPid = getpid();
 
         // Redirect stdin, stdout, stderr to /dev/null
-        char buf[] = "/dev/null";
-        fh = open(buf, O_RDWR);
-        if (fh < 0) { perror(buf); exit(-1); }
         close(0); close(1); close(2);
         ignore_result( dup(fh) ); ignore_result( dup(fh) ); ignore_result( dup(fh) );
         close(fh);
@@ -898,6 +938,18 @@ void writeInfoFile(const std::string& infofile)
     info<<"pid:"<<getpid()<<"\n";
     for(connectionItem *it = connectionItem::head; it; it=it->next)
         it->writeAddress(info);
+}
+
+void setEnvVar()
+{
+    std::ostringstream env_var;
+    env_var<<"PID="<<getpid()<<";";
+    for(connectionItem *it = connectionItem::head; it; it=it->next)
+        it->writeAddressEnv(env_var);
+    std::string env_str = env_var.str();
+    // Remove the extra semicolon
+    env_str = env_str.substr(0, env_str.size()-1);
+    setenv("PROCSERV_INFO", env_str.c_str(), 1);
 }
 
 void ttySetCharNoEcho(bool set) {

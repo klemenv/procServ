@@ -6,9 +6,9 @@
 
 
 AC_PREREQ([2.61])
-AC_INIT([procServ Process Server], [2.7.1-dev], [tech-talk@aps.anl.gov], [procServ],
+AC_INIT([procServ Process Server], [2.9.0-dev], [tech-talk@aps.anl.gov], [procServ],
         [https://github.com/ralphlange/procServ])
-AC_SUBST([PACKAGE_DATE],[01/18/2017])
+AC_SUBST([PACKAGE_DATE],[06/28/2019])
 
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CANONICAL_HOST
@@ -89,6 +89,17 @@ AS_IF([test "x$with_epics_top" != xno],
        AC_SUBST([EPICS_TOP],[$with_epics_top])
       ])
 AM_CONDITIONAL([WITH_EPICS], [test x$with_epics_top != xno])
+
+# Add configure option for building and installing procServUtils (systemd support)
+AC_ARG_WITH([systemd-utils],
+              [AS_HELP_STRING([--with-systemd-utils],
+                              [include systemd support utilities])],
+              [],
+              [with_systemd_utils=no])
+AS_IF([test "x$with_systemd_utils" = xyes], [
+     AM_PATH_PYTHON()
+])
+AM_CONDITIONAL([WITH_SYSTEMD_UTILS], [test x$with_systemd_utils = xyes])
 
 AC_ARG_ENABLE([devel],
               [AS_HELP_STRING([--enable-devel],

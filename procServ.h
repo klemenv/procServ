@@ -1,6 +1,6 @@
 // Process server for soft ioc
 // David H. Thompson 8/29/2003
-// Ralph Lange <ralph.lange@gmx.de> 2007-2016
+// Ralph Lange <ralph.lange@gmx.de> 2007-2019
 // Michael Davidsaver 2017
 // GNU Public License (GPLv3) applies - see www.gnu.org
 
@@ -21,7 +21,7 @@
 #include <time.h>
 
 /* whether to enable UNIX domain sockets */
-#ifdef __unix__
+#if defined(unix) || defined(__unix__) || defined(__unix) || defined(__APPLE__)
 #include <sys/un.h>
 # define USOCKS
 #endif
@@ -32,12 +32,15 @@
 
 #define PROCSERV_VERSION_STRING PACKAGE_STRING
 
+enum RestartMode { restart, norestart, oneshot };
+
 extern bool   inDebugMode;
 extern bool   logPortLocal;
-extern bool   autoRestart;
 extern bool   waitForManualStart;
 extern volatile bool shutdownServer;
 extern bool   setCoreSize;
+extern RestartMode restartMode;
+extern bool   firstRun;
 extern char   *procservName;
 extern char   *childName;
 extern char   *ignChars;
@@ -126,6 +129,7 @@ public:
     virtual bool isLogger() const { return _readonly; }
 
     virtual void writeAddress(std::ostream& fp) {}
+    virtual void writeAddressEnv(std::ostringstream& env_var) {}
 protected:
     connectionItem ( int fd = -1, bool readonly = false );
     int _fd;                 // File descriptor of this connection

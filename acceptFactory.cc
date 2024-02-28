@@ -18,6 +18,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <string.h>
+#include <sstream>
 
 #include "procServ.h"
 
@@ -47,6 +48,18 @@ struct acceptItemTCP : public acceptItem
         buf[sizeof(buf)-1] = '\0';
         fp<<"tcp:"<<buf<<":"<<ntohs(addr.sin_port)<<"\n";
     }
+
+    virtual void writeAddressEnv(std::ostringstream& env_var) {
+        char buf[40] = "";
+        inet_ntop(addr.sin_family, &addr.sin_addr, buf, sizeof(buf));
+        buf[sizeof(buf)-1] = '\0';
+        if(_readonly) {
+            env_var<<"LOG=";
+        } else {
+            env_var<<"CTL=";
+        }
+        env_var<<"tcp:"<<buf<<":"<<ntohs(addr.sin_port)<<";";
+    }
 };
 
 #ifdef USOCKS
@@ -71,6 +84,19 @@ struct acceptItemUNIX : public acceptItem
             fp<<"unix:"<<addr.sun_path<<"\n";
         }
     }
+
+    virtual void writeAddressEnv(std::ostringstream& env_var) {
+        if(_readonly) {
+            env_var<<"LOG=";
+        } else {
+            env_var<<"CTL=";
+        }
+        if(abstract) {
+            env_var<<"unix:@"<<&addr.sun_path[1]<<";";
+        } else {
+            env_var<<"unix:"<<addr.sun_path<<";";
+        }
+    }
 };
 #endif
 
@@ -90,7 +116,7 @@ connectionItem * acceptFactory (const char *spec, bool local, bool readonly)
         inet_addr.sin_addr.s_addr = htonl(local ? INADDR_LOOPBACK : INADDR_ANY);
         inet_addr.sin_port = htons(port);
         if(port>0xffff) {
-            fprintf( stderr, "%s: invalid control port %d (<1024)\n",
+            fprintf( stderr, "%s: invalid control port %d (must be <65536)\n",
                      procservName, port );
             exit(1);
         }
@@ -103,7 +129,7 @@ connectionItem * acceptFactory (const char *spec, bool local, bool readonly)
         inet_addr.sin_addr.s_addr = htonl(local ? INADDR_LOOPBACK : (A[0]<<24 | A[1]<<16 | A[2]<<8 | A[3]));
         inet_addr.sin_port = htons(port);
         if(port>0xffff) {
-            fprintf( stderr, "%s: invalid control port %d (<1024)\n",
+            fprintf( stderr, "%s: invalid control port %d (must be <65536)\n",
                      procservName, port );
             exit(1);
         }
@@ -158,12 +184,24 @@ void acceptItemTCP::remakeConnection()
         throw errno;
     }
 
-    setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    int setsockoptStatus = setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &optval,
+                                      sizeof(optval));
+    if (setsockoptStatus < 0)
+        PRINTF("Setsockopt error while trying to set SO_REUSEADDR: %s\n",
+               strerror(errno));
 #ifdef SOLARIS
-    setsockopt(_fd, SOL_SOCKET, SO_EXCLBIND, &optval, sizeof(optval));
+    int setsockoptStatus = setsockopt(_fd, SOL_SOCKET, SO_EXCLBIND, &optval,
+                                      sizeof(optval));
+    if (setsockoptStatus < 0)
+        PRINTF("Setsockopt error while trying to set SO_EXCLBIND: %s\n",
+               strerror(errno));
 #endif
 #ifdef _WIN32
-    setsockopt(_fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, &optval, sizeof(optval));
+    int setsockoptStatus = setsockopt(_fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                                      &optval, sizeof(optval));
+    if (setsockoptStatus < 0)
+        PRINTF("Setsockopt error while trying to set SO_EXCLUSIVEADDRUSE: %s\n",
+               strerror(errno));
 #endif
 
     bindStatus = bind(_fd, (struct sockaddr *) &addr, sizeof(addr));
