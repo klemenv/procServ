@@ -28,6 +28,7 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <string.h>
 
 #ifdef __CYGWIN__
@@ -93,6 +94,7 @@ char   infoMessage3[INFO3LEN];   // Sign on message: available server commands
 char   *logFile = NULL;          // File name for log
 int    logFileFD=-1;             // FD for log file
 char  *logPort;                  // address for logger connections
+char   *logRotate = NULL;        // Log rotate configuration, ie. 100k to rotate every after reaching 100kB
 int    debugFD=-1;               // FD for debug output
 
 #define MAX_CONNECTIONS 64
@@ -104,6 +106,7 @@ void OnPollTimeout();
 // Daemonizes the program
 void forkAndGo();
 void openLogFile();
+void rotateLogFile();
 void setEnvVar();
 void writeInfoFile(const std::string& infofile);
 void ttySetCharNoEcho(bool save);
@@ -244,6 +247,7 @@ int main(int argc,char * argv[])
             {"logport",        required_argument, 0, 'l'},
             {"logfile",        required_argument, 0, 'L'},
             {"logstamp",       optional_argument, 0, 'S'},
+            {"logrotate",      required_argument, 0, 'r'},
             {"name",           required_argument, 0, 'n'},
             {"noautorestart",  no_argument,       0, 'N'},
             {"oneshot",        no_argument,       0, 'o'},
@@ -261,7 +265,7 @@ int main(int argc,char * argv[])
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "+c:de:fhi:I:k:l:L:n:op:P:qVwx:",
+        c = getopt_long (argc, argv, "+c:de:fhi:I:k:l:L:r:n:op:P:qVwx:",
                          long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -308,6 +312,10 @@ int main(int argc,char * argv[])
             stampLog = true;
             if (optarg)
                 stampFormat = strdup(optarg);
+            break;
+
+        case 'r':
+            logRotate = strdup(optarg);           // Log rotate configuration, ie. 100k, 1M, 5D, 1W, 1M
             break;
 
         case 'h':                                 // Help
@@ -643,7 +651,9 @@ int main(int argc,char * argv[])
             PRINTF("SigHup received\n");
             openLogFile();
         }
-        
+
+        rotateLogFile();
+
         if (0 == ready) {                     // Timeout
             // Go clean up dead connections
             OnPollTimeout();
@@ -929,6 +939,49 @@ void openLogFile()
         } else {
             PRINTF("Opened file %s for logging\n", logFile);
         }
+    }
+}
+
+void rotateLogFile()
+{
+    size_t len;
+    off_t number;
+    char qualifier;
+    struct stat st;
+    int rotate = 0;
+    char *newLogFile;
+    struct tm *timeinfo;
+    time_t now;
+
+    time(&now);
+    if (logFile && strcmp(logFile, "-")==0 && logRotate && strlen(logRotate)>0) {
+        qualifier = logRotate[strlen(logRotate) - 1];
+        number = atoi(logRotate);
+        if (stat(logFile, &st)==0) {
+            if (qualifier=='K' || qualifier=='k') {
+                rotate = (st.st_size > number*1024);
+            } else if (qualifier=='M' || qualifier=='m') {
+                rotate = (st.st_size > number*1024*1024);
+            } else if (qualifier=='D' || qualifier=='d') {
+                rotate = ((now - st.st_ctime) > number*86400);
+            } else if (qualifier=='W' || qualifier=='w') {
+                rotate = ((now - st.st_ctime) > number*7*86400);
+            } else if (qualifier=='M' || qualifier=='m') {
+                rotate = ((now - st.st_ctime) > number*30*86400);
+            } else if (qualifier=='Y' || qualifier=='y') {
+                rotate = ((now - st.st_ctime) > number*365*86400);
+            }
+        }
+    }
+
+    if (rotate) {
+        len = strlen(logFile)+32;
+        newLogFile = (char*)malloc(len);
+        strcpy(newLogFile, logFile);
+        timeinfo = localtime(&now);
+        strftime(&newLogFile[strlen(newLogFile)], len, "_%Y%m%d%H%M%S", timeinfo);
+        rename(logFile, newLogFile);
+        openLogFile();
     }
 }
 
