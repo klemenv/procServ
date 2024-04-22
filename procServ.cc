@@ -94,6 +94,8 @@ char   infoMessage3[INFO3LEN];   // Sign on message: available server commands
 char   *logFile = NULL;          // File name for log
 int    logFileFD=-1;             // FD for log file
 char  *logPort;                  // address for logger connections
+off_t  rotateSize=0;             // Max log size in bytes
+time_t rotateTime=0;             // Max log age in seconds
 char   *logRotate = NULL;        // Log rotate configuration, ie. 100k to rotate every after reaching 100kB
 int    debugFD=-1;               // FD for debug output
 
@@ -192,6 +194,7 @@ void printHelp()
            " -p --pidfile <str>       write PID file (for server PID)\n"
            " -P --port <endpoint>     allow control connections through telnet <endpoint>\n"
            " -q --quiet               suppress informational output (server)\n"
+           " -r --logrotate <policy>  rotate logfile based on size [number + K,M] or time [number + d,w,m,y]\n"
            "    --restrict            restrict log access to connections from localhost\n"
            "    --timefmt <str>       set time format (strftime) to <str>\n"
            " -V --version             print program version\n"
@@ -315,7 +318,7 @@ int main(int argc,char * argv[])
             break;
 
         case 'r':
-            logRotate = strdup(optarg);           // Log rotate configuration, ie. 100k, 1M, 5D, 1W, 1M
+            logRotate = strdup(optarg);           // Log rotate configuration, ie. 100K, 2M, 7d, 1w, 1m
             break;
 
         case 'h':                                 // Help
@@ -552,6 +555,26 @@ int main(int argc,char * argv[])
 
     procservPid=getpid();
 
+    // Parse the logrotate parameters and set-up rotating policy
+    if (logRotate && strlen(logRotate)>0) {
+        char qualifier = logRotate[strlen(logRotate) - 1];
+        int number = atoi(logRotate);
+        if (qualifier=='d') {
+            rotateTime = number*86400;
+        } else if (qualifier=='w') {
+            rotateTime = number*7*86400;
+        } else if (qualifier=='m') {
+            rotateTime = number*30*86400;
+        } else if (qualifier=='y') {
+            rotateTime = number*365*86400;
+        } else if (qualifier=='K') {
+            rotateSize = number * 1024;
+        } else if (qualifier=='M') {
+            rotateSize = number*1024*1024;
+        } else { // qualifier=='B' or missing
+            rotateSize = number;
+        }
+    }
     openLogFile();
 
     if (false == inFgMode && false == inDebugMode)
@@ -944,43 +967,27 @@ void openLogFile()
 
 void rotateLogFile()
 {
-    size_t len;
-    off_t number;
-    char qualifier;
-    struct stat st;
     int rotate = 0;
-    char *newLogFile;
-    struct tm *timeinfo;
+    struct stat st;
     time_t now;
 
     time(&now);
-    if (logFile && strcmp(logFile, "-")==0 && logRotate && strlen(logRotate)>0) {
-        qualifier = logRotate[strlen(logRotate) - 1];
-        number = atoi(logRotate);
-        if (stat(logFile, &st)==0) {
-            if (qualifier=='K' || qualifier=='k') {
-                rotate = (st.st_size > number*1024);
-            } else if (qualifier=='M' || qualifier=='m') {
-                rotate = (st.st_size > number*1024*1024);
-            } else if (qualifier=='D' || qualifier=='d') {
-                rotate = ((now - st.st_ctime) > number*86400);
-            } else if (qualifier=='W' || qualifier=='w') {
-                rotate = ((now - st.st_ctime) > number*7*86400);
-            } else if (qualifier=='M' || qualifier=='m') {
-                rotate = ((now - st.st_ctime) > number*30*86400);
-            } else if (qualifier=='Y' || qualifier=='y') {
-                rotate = ((now - st.st_ctime) > number*365*86400);
-            }
+
+    if (stat(logFile, &st)==0) {
+        if (rotateSize>0 && rotateSize<st.st_size) {
+            rotate = 1;
+        }
+        if (rotateTime>0 && rotateTime<(now-st.st_ctime)) {
+            rotate = 1;
         }
     }
 
-    if (rotate) {
-        len = strlen(logFile)+32;
-        newLogFile = (char*)malloc(len);
-        strcpy(newLogFile, logFile);
-        timeinfo = localtime(&now);
-        strftime(&newLogFile[strlen(newLogFile)], len, "_%Y%m%d%H%M%S", timeinfo);
-        rename(logFile, newLogFile);
+    if (rotate==1) {
+        std::string newLogFile(logFile);
+        char buf[32];
+        strftime(buf, sizeof(buf), "_%Y%m%d-%H%M%S", localtime(&now));
+        newLogFile += buf;
+        rename(logFile, newLogFile.c_str());
         openLogFile();
     }
 }
